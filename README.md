@@ -47,23 +47,26 @@ existing long — the bot never opens a new short position in BTC/USD.
 ## Architecture
 
 ```
-config.py          Loads .env, defines per-symbol strategy/timeframe/risk config
-alpaca_client.py    Thin wrapper over alpaca-py: account, bars, quotes, orders
-indicators.py       Pure functions: SMA, rolling std, EMA, ATR, rolling high/low
-portfolio.py        Local position/stop state, persisted to portfolio_state.json
-risk.py             Position sizing, stop-loss/trailing-stop math, correlation filter
-strategies/         One Strategy subclass per approach (mean reversion, momentum
-                    breakout, trend following); pluggable via STRATEGY_REGISTRY
-main.py             Poll loop: checks stops every tick, evaluates strategy signals
-                    only when a new bar has closed for that symbol's timeframe
-tests/              Unit tests for indicators/strategies/risk using synthetic data
-                    (no network or API keys required)
+config.py                  Loads .env, defines per-symbol strategy/timeframe/risk config
+bot/
+  alpaca_client.py         Thin wrapper over alpaca-py: account, bars, quotes, orders
+  indicators.py            Pure functions: SMA, rolling std, EMA, ATR, rolling high/low
+  portfolio.py             Local position/stop state, persisted to portfolio_state.json
+  risk_manager.py          Position sizing, stop-loss/trailing-stop math, correlation filter
+  strategies/              One Strategy subclass per approach (mean reversion, momentum
+                           breakout, trend following); pluggable via STRATEGY_REGISTRY
+  main.py                  Poll loop: checks stops every tick, evaluates strategy signals
+                           only when a new bar has closed for that symbol's timeframe
+  tests/                   Unit tests for indicators/strategies/risk using synthetic data
+                           (no network or API keys required)
 ```
 
 Each strategy only looks at price history and the current position side, and returns
 a `Signal` (`LONG` / `SHORT` / `EXIT` / `HOLD`). Sizing, stops, and order execution are
-all handled centrally in `main.py` / `risk.py`, so the same risk model applies
-uniformly no matter which strategy is trading.
+all handled centrally in `bot/main.py` / `bot/risk_manager.py`, so the same risk model
+applies uniformly no matter which strategy is trading. `config.py` lives at the repo
+root (outside the `bot` package) since it's the one file you're expected to open and
+edit for local setup.
 
 ## Setup
 
@@ -86,12 +89,12 @@ uniformly no matter which strategy is trading.
 
 4. **Run the tests** (no API keys needed — pure logic only):
    ```bash
-   python -m pytest tests/ -v
+   python -m pytest bot/tests/ -v
    ```
 
-5. **Run the bot:**
+5. **Run the bot** (from the repo root, as a module so `bot/` can import the root-level `config.py`):
    ```bash
-   python main.py
+   python -m bot.main
    ```
    Logs go to both the console and `logs/tradingbot.log` (rotating, 3x5MB). Position
    state persists to `portfolio_state.json` so a restart doesn't lose trailing-stop

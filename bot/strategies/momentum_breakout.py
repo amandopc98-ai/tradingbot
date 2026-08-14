@@ -2,7 +2,7 @@ from typing import Optional
 
 import pandas as pd
 
-from strategies.base import Signal, Strategy
+from bot.strategies.base import Signal, Strategy
 
 
 class MomentumBreakoutStrategy(Strategy):

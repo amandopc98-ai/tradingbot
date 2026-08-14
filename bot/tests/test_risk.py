@@ -1,5 +1,5 @@
-import risk
-from portfolio import Portfolio
+from bot import risk_manager as risk
+from bot.portfolio import Portfolio
 
 
 def test_position_size_scales_inversely_with_atr():
@@ -44,7 +44,7 @@ def test_initial_stop_price_long_and_short():
 
 
 def test_trailing_stop_only_tightens_never_loosens_for_long():
-    from portfolio import Position
+    from bot.portfolio import Position
 
     pos = Position(
         symbol="BTC/USD", side="long", qty=1.0, entry_price=100.0, entry_atr=5.0,
@@ -60,7 +60,7 @@ def test_trailing_stop_only_tightens_never_loosens_for_long():
 
 
 def test_trailing_stop_none_leaves_hard_stop_untouched():
-    from portfolio import Position
+    from bot.portfolio import Position
 
     pos = Position(
         symbol="SPY", side="long", qty=1.0, entry_price=100.0, entry_atr=5.0,
@@ -71,7 +71,7 @@ def test_trailing_stop_none_leaves_hard_stop_untouched():
 
 
 def test_stop_triggered_long_and_short():
-    from portfolio import Position
+    from bot.portfolio import Position
 
     long_pos = Position("SPY", "long", 1.0, 100.0, 5.0, 95.0, 100.0, "2026-01-01T00:00:00+00:00")
     assert risk.stop_triggered(long_pos, current_price=94.0) is True

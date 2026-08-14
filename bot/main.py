@@ -9,12 +9,12 @@ from typing import Dict
 
 import pandas as pd
 
-import indicators
-import risk
-from alpaca_client import AlpacaClient
+from bot import indicators
+from bot import risk_manager as risk
+from bot.alpaca_client import AlpacaClient
+from bot.portfolio import Portfolio
+from bot.strategies import STRATEGY_REGISTRY, Signal, Strategy
 from config import Config, SymbolConfig, load_config
-from portfolio import Portfolio
-from strategies import STRATEGY_REGISTRY, Signal, Strategy
 
 logger = logging.getLogger("tradingbot")
 

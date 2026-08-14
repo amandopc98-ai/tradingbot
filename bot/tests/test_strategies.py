@@ -1,10 +1,10 @@
 import numpy as np
 import pandas as pd
 
-from strategies.base import Signal
-from strategies.mean_reversion import MeanReversionStrategy
-from strategies.momentum_breakout import MomentumBreakoutStrategy
-from strategies.trend_following import TrendFollowingStrategy
+from bot.strategies.base import Signal
+from bot.strategies.mean_reversion import MeanReversionStrategy
+from bot.strategies.momentum_breakout import MomentumBreakoutStrategy
+from bot.strategies.trend_following import TrendFollowingStrategy
 
 
 # ---------------------------------------------------------------------------

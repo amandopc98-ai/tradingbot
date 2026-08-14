@@ -18,8 +18,8 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
 
+from bot.portfolio import Position
 from config import Config
-from portfolio import Position
 
 logger = logging.getLogger(__name__)
 

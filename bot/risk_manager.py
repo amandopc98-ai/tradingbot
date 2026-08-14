@@ -13,7 +13,7 @@ risk beyond the initial hard stop.
 import math
 from typing import Optional
 
-from portfolio import Portfolio, Position
+from bot.portfolio import Portfolio, Position
 
 CRYPTO_ASSET_CLASS = "crypto"
 

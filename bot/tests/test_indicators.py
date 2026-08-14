@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-import indicators
+from bot import indicators
 
 
 def make_ohlcv(closes, high_offset=0.5, low_offset=0.5, volume=1000):

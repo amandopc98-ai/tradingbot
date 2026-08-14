@@ -1,7 +1,7 @@
-from strategies.base import Signal, Strategy
-from strategies.mean_reversion import MeanReversionStrategy
-from strategies.momentum_breakout import MomentumBreakoutStrategy
-from strategies.trend_following import TrendFollowingStrategy
+from bot.strategies.base import Signal, Strategy
+from bot.strategies.mean_reversion import MeanReversionStrategy
+from bot.strategies.momentum_breakout import MomentumBreakoutStrategy
+from bot.strategies.trend_following import TrendFollowingStrategy
 
 STRATEGY_REGISTRY = {
     "mean_reversion": MeanReversionStrategy,
