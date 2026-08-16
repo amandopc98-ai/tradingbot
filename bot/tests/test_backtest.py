@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-from bot.backtest import Backtester, BacktestResult, DEFAULT_INITIAL_EQUITY, Trade, _lookback_start, _save_equity_curve
+from bot.backtest import Backtester, BacktestResult, DEFAULT_INITIAL_EQUITY, Trade, _lookback_start, _save_equity_curve, parse_args
 from config import Config, SymbolConfig
 
 
@@ -52,6 +52,10 @@ QQQ_CFG = SymbolConfig(
 BTC_CFG = SymbolConfig(
     strategy="momentum_breakout", timeframe=TimeFrame.Hour,
     asset_class="crypto", params={"period": 20, "volume_mult": 1.5}, trail_atr_mult=2.0,
+)
+GLD_CFG = SymbolConfig(  # GLD's real live mapping: trend_following, 4h - unrelated to the opening-range override tests below
+    strategy="trend_following", timeframe=TimeFrame(4, TimeFrameUnit.Hour),
+    asset_class="stock", params={"fast": 50, "slow": 200}, trail_atr_mult=3.0,
 )
 
 
@@ -212,3 +216,82 @@ def test_save_equity_curve_writes_csv(tmp_path):
     contents = open(path).read()
     assert "timestamp,equity" in contents
     assert "101000.00" in contents
+
+
+# ---------------------------------------------------------------------------
+# --strategy override: opening_range_breakout for GLD without touching GLD's live
+# trend_following mapping in config.py
+# ---------------------------------------------------------------------------
+
+_ORB_DAY = "2026-07-09"
+
+_ORB_LONG_SETUP = {
+    "15:40": {"high": 101.0},
+    "15:50": {"low": 99.0},
+    "16:05": {"open": 100.0, "high": 106.0, "low": 100.0, "close": 105.0},
+    "16:10": {"open": 105.0, "high": 105.5, "low": 101.5, "close": 102.0},
+    "16:15": {"open": 102.0, "high": 107.5, "low": 102.0, "close": 107.0},
+}
+
+
+def _make_orb_day_bars(overrides: dict, end_time: str = "22:00", base_price: float = 100.0) -> pd.DataFrame:
+    idx = pd.date_range(f"{_ORB_DAY} 15:29", f"{_ORB_DAY} {end_time}", freq="1min", tz="Europe/Berlin")
+    df = pd.DataFrame(
+        {"open": base_price, "high": base_price, "low": base_price, "close": base_price, "volume": 1000.0},
+        index=idx,
+    )
+    for time_str, ohlc in overrides.items():
+        ts = pd.Timestamp(f"{_ORB_DAY} {time_str}", tz="Europe/Berlin")
+        for col, val in ohlc.items():
+            df.loc[ts, col] = val
+    return df
+
+
+def test_strategy_override_uses_opening_range_breakout_for_gld():
+    overrides = dict(_ORB_LONG_SETUP)
+    overrides["16:20"] = {"open": 107.0, "high": 107.0, "low": 97.0, "close": 98.0}  # range-based stop (99) hit
+    bars = _make_orb_day_bars(overrides)
+
+    cfg = _make_cfg({"GLD": GLD_CFG})
+    client = _FakeClient({"GLD": bars})
+    engine = Backtester(
+        cfg, client, initial_equity=DEFAULT_INITIAL_EQUITY, strategy_overrides={"GLD": "opening_range_breakout"}
+    )
+
+    start = datetime(2026, 7, 9, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 10, tzinfo=timezone.utc)
+    results = engine.run(["GLD"], start, end)
+    result = results["GLD"]
+
+    assert result.num_trades == 1
+    trade = result.trades[0]
+    assert trade.side == "long"
+    assert trade.entry_price == 107.0
+    # Exits exactly at the range-based stop's triggering bar (98.0, at 16:20) - if the
+    # generic ATR stop from Phase 1 had NOT been skipped, the tiny ATR from the mostly
+    # flat pre-breakout data would have closed this at/near 107 on the very next bar
+    # instead, so this pins down that self_managed_exits was actually honored.
+    assert trade.exit_price == 98.0
+    assert trade.exit_reason == "signal"
+    assert trade.pnl < 0
+
+
+def test_strategy_override_does_not_mutate_gld_live_config():
+    cfg = _make_cfg({"GLD": GLD_CFG})
+    client = _FakeClient({"GLD": _make_orb_day_bars(_ORB_LONG_SETUP)})
+    engine = Backtester(cfg, client, strategy_overrides={"GLD": "opening_range_breakout"})
+
+    engine.run(["GLD"], datetime(2026, 7, 9, tzinfo=timezone.utc), datetime(2026, 7, 10, tzinfo=timezone.utc))
+
+    assert cfg.symbols["GLD"].strategy == "trend_following"
+    assert cfg.symbols["GLD"].timeframe == GLD_CFG.timeframe
+
+
+def test_parse_args_strategy_override():
+    args = parse_args(["--symbol", "GLD", "--strategy", "opening_range_breakout", "--start", "2026-07-06", "--end", "2026-07-10"])
+    assert args.strategy_override == "opening_range_breakout"
+
+
+def test_parse_args_strategy_override_defaults_to_none():
+    args = parse_args(["--symbol", "GLD", "--start", "2026-07-06", "--end", "2026-07-10"])
+    assert args.strategy_override is None
