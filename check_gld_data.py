@@ -7,11 +7,16 @@ Loads config/AlpacaClient exactly the way bot/main.py's run() does, then fetches
 uses, and prints a short report. Nothing here is imported by, or changes the
 behavior of, bot/main.py, bot/backtest.py, or any other part of the bot.
 
+The queried period is a fixed date range in the past (see PERIOD_START/PERIOD_END
+below) rather than "the last N days relative to now", because the free Alpaca data
+plan rejects recent SIP data with "subscription does not permit querying recent SIP
+data" - a past period sidesteps that restriction.
+
 Usage:
     python check_gld_data.py
 """
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from alpaca.data.timeframe import TimeFrame
 
@@ -21,7 +26,8 @@ from config import load_config
 SYMBOL = "GLD"
 ASSET_CLASS = "stock"
 TRADING_DAYS_WANTED = 5
-CALENDAR_LOOKBACK_DAYS = 12  # generous buffer so 5 *trading* days fit even across a weekend/holiday
+PERIOD_START = datetime(2026, 7, 6, tzinfo=timezone.utc)
+PERIOD_END = datetime(2026, 7, 10, 23, 59, 59, tzinfo=timezone.utc)  # end of day, so the full last trading day is included
 BERLIN_TZ = "Europe/Berlin"
 SAMPLE_WINDOW_START = "15:29"
 SAMPLE_WINDOW_END = "16:00"
@@ -37,10 +43,10 @@ def main() -> int:
         print(f"FEHLER beim Initialisieren von Config/AlpacaClient: {exc}")
         return 1
 
-    # Step 2: fetch 1-minute bars for the last ~5 trading days via get_bars_range,
+    # Step 2: fetch 1-minute bars for the fixed historical period via get_bars_range,
     # the same method bot/backtest.py uses for historical data.
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=CALENDAR_LOOKBACK_DAYS)
+    start = PERIOD_START
+    end = PERIOD_END
 
     print(f"Frage 1-Minuten-Bars fuer {SYMBOL} ab: {start.date()} bis {end.date()} (UTC) ...")
     try:
