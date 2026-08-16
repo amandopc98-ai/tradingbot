@@ -37,13 +37,26 @@ Fidelity notes (read before trusting the numbers):
     Portfolio so the SPY/QQQ-blocks-BTC correlation filter behaves correctly across
     symbols; bars from every symbol are replayed in true chronological order for
     that reason, even though each symbol still gets its own equity curve.
+
+Strategy overrides (--strategy): a backtest can explore a different strategy for a
+symbol than config.py's live mapping without changing that mapping at all - e.g.
+`--symbol GLD --strategy opening_range_breakout` backtests GLD with the opening-range
+strategy while bot/main.py keeps trading GLD with trend_following, untouched. Some
+strategies (currently opening_range_breakout) manage their own stop-loss/take-profit
+internally instead of the shared ATR-based one in bot/risk_manager.py, because their
+exit levels are fixed price levels, not ATR multiples. Those strategies declare a
+`self_managed_exits = True` attribute; this engine checks for it via getattr() and,
+only when present, (a) skips the generic ATR stop-loss check in Phase 1 below, and
+(b) sizes the entry using the strategy's own get_entry_stop_price() instead of ATR.
+Every existing strategy is unaffected - the attribute is simply absent on them, so
+getattr() returns the old default and behavior is unchanged.
 """
 import argparse
 import csv
 import os
 import tempfile
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
@@ -55,11 +68,19 @@ from bot import risk_manager as risk
 from bot.alpaca_client import AlpacaClient
 from bot.main import build_strategies, shorting_allowed
 from bot.portfolio import Portfolio
-from bot.strategies import Signal, Strategy
+from bot.strategies import STRATEGY_REGISTRY, Signal, Strategy
 from config import Config, SymbolConfig, load_config
 
 DEFAULT_INITIAL_EQUITY = 100_000.0
 STOP_CHECK_WINDOW = 20  # mirrors main.py's client.get_bars(..., limit=20) for the stop-loss ATR
+
+# Only consulted for strategies passed via --strategy that aren't already some
+# symbol's live default (see config.py's _default_symbols()) - i.e. a strategy this
+# backtest is exploring "off label" for a symbol. Purely additive; doesn't touch
+# config.py or change any symbol's live timeframe.
+BACKTEST_STRATEGY_DEFAULT_TIMEFRAMES = {
+    "opening_range_breakout": TimeFrame.Minute,
+}
 
 _TIMEFRAME_UNIT_SECONDS = {
     TimeFrameUnit.Minute: 60,
@@ -153,10 +174,17 @@ def _latest_atr(window: pd.DataFrame) -> float:
 
 
 class Backtester:
-    def __init__(self, cfg: Config, client: AlpacaClient, initial_equity: float = DEFAULT_INITIAL_EQUITY):
+    def __init__(
+        self,
+        cfg: Config,
+        client: AlpacaClient,
+        initial_equity: float = DEFAULT_INITIAL_EQUITY,
+        strategy_overrides: Optional[Dict[str, str]] = None,
+    ):
         self.cfg = cfg
         self.client = client
         self.initial_equity = initial_equity
+        self.strategy_overrides = strategy_overrides or {}
         self._entry_ts: Dict[str, str] = {}
 
     def run(self, symbols: List[str], start: datetime, end: datetime) -> Dict[str, BacktestResult]:
@@ -176,6 +204,13 @@ class Backtester:
         for symbol in symbols:
             scfg = self.cfg.symbols[symbol]
             strategy = strategies[symbol]
+
+            override_name = self.strategy_overrides.get(symbol)
+            if override_name is not None:
+                strategy = STRATEGY_REGISTRY[override_name](symbol)
+                override_timeframe = BACKTEST_STRATEGY_DEFAULT_TIMEFRAMES.get(override_name, scfg.timeframe)
+                scfg = replace(scfg, strategy=override_name, timeframe=override_timeframe)
+
             entry_window = strategy.min_bars + 5
 
             lookback_start = _lookback_start(
@@ -218,8 +253,11 @@ class Backtester:
 
         # Phase 1: stop-loss / trailing-stop check - mirrors the "every tick" check
         # in main.py's process_symbol, evaluated once per closed bar here since only
-        # OHLC bar data is available (see module docstring).
-        if position is not None:
+        # OHLC bar data is available (see module docstring). Skipped entirely for
+        # self_managed_exits strategies, which handle their own stop/target/EOD
+        # closes through Signal.EXIT in Phase 2 instead.
+        self_managed = getattr(w.strategy, "self_managed_exits", False)
+        if position is not None and not self_managed:
             stop_window = w.bars.iloc[max(0, i + 1 - STOP_CHECK_WINDOW):i + 1]
             atr_value = _latest_atr(stop_window)
             risk.update_trailing_stop(position, close, atr_value, w.scfg.trail_atr_mult)
@@ -240,17 +278,24 @@ class Backtester:
 
             elif signal in (Signal.LONG, Signal.SHORT) and position is None:
                 side = "long" if signal == Signal.LONG else "short"
+
+                if self_managed:
+                    stop_price = w.strategy.get_entry_stop_price(signal_window, side)
+                    sizing_distance = abs(close - stop_price) if stop_price is not None else 0.0
+                else:
+                    sizing_distance = atr_value
+                    stop_price = risk.initial_stop_price(close, atr_value, side)
+
                 blocked = (
                     (side == "short" and not shorting_allowed(symbol, w.scfg, self.cfg))
                     or risk.correlation_blocked(symbol, side, portfolio)
-                    or atr_value <= 0
+                    or sizing_distance <= 0
                 )
                 if not blocked:
                     equity = equity_by_symbol[symbol]
-                    qty = risk.position_size(equity, atr_value, close, self.cfg.risk_pct, w.scfg.asset_class)
+                    qty = risk.position_size(equity, sizing_distance, close, self.cfg.risk_pct, w.scfg.asset_class)
                     qty = risk.cap_by_buying_power(qty, equity, close, w.scfg.max_allocation_pct, w.scfg.asset_class)
                     if qty > 0:
-                        stop_price = risk.initial_stop_price(close, atr_value, side)
                         portfolio.open(symbol, side, qty, close, atr_value, stop_price)
                         self._entry_ts[symbol] = ts.isoformat()
 
@@ -290,8 +335,8 @@ class Backtester:
         portfolio.remove(symbol)
 
 
-def _print_report(symbol: str, scfg: SymbolConfig, start: datetime, end: datetime, result: BacktestResult) -> None:
-    print(f"\n=== Backtest: {symbol} ({scfg.strategy}) ===")
+def _print_report(symbol: str, strategy_name: str, start: datetime, end: datetime, result: BacktestResult) -> None:
+    print(f"\n=== Backtest: {symbol} ({strategy_name}) ===")
     print(f"Period: {start.date()} -> {end.date()}")
     print(f"Bars evaluated: {len(result.equity_curve)}")
     print(f"Trades: {result.num_trades}")
@@ -334,6 +379,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--output-dir", default="backtests",
         help="Directory to write equity-curve CSVs into (default: backtests/)",
     )
+    parser.add_argument(
+        "--strategy", dest="strategy_override", metavar="STRATEGY_NAME",
+        help=(
+            "Override which strategy to backtest, applied to every --symbol given in "
+            "this run (e.g. --symbol GLD --strategy opening_range_breakout). Does not "
+            "change config.py's live symbol->strategy mapping - only this one "
+            "backtest invocation. Available: " + ", ".join(sorted(STRATEGY_REGISTRY))
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -347,6 +401,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     if unknown:
         raise SystemExit(f"Unknown symbol(s): {', '.join(unknown)}. Configured symbols: {', '.join(cfg.symbols)}")
 
+    strategy_overrides: Dict[str, str] = {}
+    if args.strategy_override:
+        if args.strategy_override not in STRATEGY_REGISTRY:
+            raise SystemExit(
+                f"Unknown --strategy '{args.strategy_override}'. Available: {', '.join(sorted(STRATEGY_REGISTRY))}"
+            )
+        strategy_overrides = {s: args.strategy_override for s in symbols}
+
     start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc)
     if end <= start:
@@ -354,11 +416,12 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    engine = Backtester(cfg, client, initial_equity=args.equity)
+    engine = Backtester(cfg, client, initial_equity=args.equity, strategy_overrides=strategy_overrides)
     results = engine.run(symbols, start, end)
 
     for symbol in symbols:
-        _print_report(symbol, cfg.symbols[symbol], start, end, results[symbol])
+        effective_strategy_name = strategy_overrides.get(symbol, cfg.symbols[symbol].strategy)
+        _print_report(symbol, effective_strategy_name, start, end, results[symbol])
         path = _save_equity_curve(results[symbol], symbol, start, end, args.output_dir)
         print(f"Equity curve saved to: {path}")
 

@@ -24,6 +24,13 @@ shared ATR-based risk model.
 selling. The breakout strategy's "short" signal is therefore only used to *exit* an
 existing long — the bot never opens a new short position in BTC/USD.
 
+**A sixth strategy, `opening_range_breakout`, exists but is backtest-only** — it is
+not wired into any symbol's live mapping above. It trades the 15:29-16:00
+Europe/Berlin opening range: waits for a close beyond the range, then a retest of
+the broken level, then enters on a close back through the breakout bar's extreme,
+with a fixed stop at the opposite range boundary and a take-profit at a configurable
+R-multiple (default 1.8x risk). See **Backtesting** below for how to run it.
+
 ## Risk management
 
 - **ATR-based position sizing.** Each symbol's 14-period ATR is computed on every
@@ -54,7 +61,8 @@ bot/
   portfolio.py             Local position/stop state, persisted to portfolio_state.json
   risk_manager.py          Position sizing, stop-loss/trailing-stop math, correlation filter
   strategies/              One Strategy subclass per approach (mean reversion, momentum
-                           breakout, trend following); pluggable via STRATEGY_REGISTRY
+                           breakout, trend following, opening-range breakout); pluggable
+                           via STRATEGY_REGISTRY
   main.py                  Poll loop: checks stops every tick, evaluates strategy signals
                            only when a new bar has closed for that symbol's timeframe
   backtest.py              Replays the same strategies/risk model over historical bars
@@ -123,6 +131,13 @@ python -m bot.backtest --symbol SPY --start 2023-01-01 --end 2024-01-01
 - `--equity` sets the starting simulated equity per symbol (default 100,000).
 - `--output-dir` sets where equity-curve CSVs are written (default `backtests/`, which
   is gitignored).
+- `--strategy` overrides which strategy runs, for every `--symbol` in that invocation
+  — e.g. `--symbol GLD --strategy opening_range_breakout` backtests GLD with the
+  opening-range strategy instead of its live trend_following mapping, without
+  changing that live mapping in `config.py` at all. Strategies whose stop-loss/
+  take-profit aren't ATR-based (currently only `opening_range_breakout`) manage their
+  own exits internally instead of the shared ATR stop — see the `self_managed_exits`
+  note in `bot/backtest.py`'s module docstring.
 
 For each symbol it prints total return, win rate, number of trades, and max drawdown,
 and writes a timestamp/equity CSV you can plot yourself. See the module docstring in
