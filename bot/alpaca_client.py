@@ -2,6 +2,7 @@
 market order submission for both equities and crypto.
 """
 import logging
+from datetime import datetime
 from typing import Dict, Optional
 
 import pandas as pd
@@ -54,6 +55,29 @@ class AlpacaClient:
             raw = self.crypto_data.get_crypto_bars(req).df
         else:
             req = StockBarsRequest(symbol_or_symbols=[symbol], timeframe=timeframe, limit=limit)
+            raw = self.stock_data.get_stock_bars(req).df
+
+        if raw is None or raw.empty:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+        if isinstance(raw.index, pd.MultiIndex):
+            raw = raw.xs(symbol, level=0)
+
+        return raw.sort_index()
+
+    def get_bars_range(
+        self, symbol: str, timeframe: TimeFrame, start: datetime, end: datetime, asset_class: str
+    ) -> pd.DataFrame:
+        """Historical bars for a fixed [start, end] date range, used by the backtester
+        (bot/backtest.py). The live loop only ever calls get_bars() with a `limit`, so
+        this is purely additive - it doesn't change get_bars()'s behavior at all.
+        alpaca-py paginates large start/end ranges internally.
+        """
+        if asset_class == CRYPTO_ASSET_CLASS:
+            req = CryptoBarsRequest(symbol_or_symbols=[symbol], timeframe=timeframe, start=start, end=end)
+            raw = self.crypto_data.get_crypto_bars(req).df
+        else:
+            req = StockBarsRequest(symbol_or_symbols=[symbol], timeframe=timeframe, start=start, end=end)
             raw = self.stock_data.get_stock_bars(req).df
 
         if raw is None or raw.empty:
