@@ -28,6 +28,7 @@ ASSET_CLASS = "stock"
 TRADING_DAYS_WANTED = 5
 PERIOD_START = datetime(2026, 7, 6, tzinfo=timezone.utc)
 PERIOD_END = datetime(2026, 7, 10, 23, 59, 59, tzinfo=timezone.utc)  # end of day, so the full last trading day is included
+SAMPLE_DAY = datetime(2026, 7, 9, tzinfo=timezone.utc).date()  # Thursday, a known trading day within the period
 BERLIN_TZ = "Europe/Berlin"
 SAMPLE_WINDOW_START = "15:29"
 SAMPLE_WINDOW_END = "16:00"
@@ -91,16 +92,25 @@ def main() -> int:
     print(f"Letzte Bar: {last_ts}")
     print(f"Durchschnittliche Bars pro Handelstag: {avg_bars_per_day:.1f}")
 
-    # Step 4: sample window on the most recent day, converted to German local time
+    # Step 4: sample window on a single day with confirmed data, converted to German
+    # local time. The day is picked from `last_days` (real UTC trading days that
+    # actually have bars) rather than from tz-converted dates: converting first and
+    # then taking the latest local date can produce a phantom "day" made up only of
+    # a handful of late-UTC bars that roll into the next calendar day in Berlin time
+    # (e.g. a Friday's last bars showing up as "Saturday" locally, with no real data).
+    if SAMPLE_DAY in last_days:
+        sample_day = SAMPLE_DAY
+    else:
+        sample_day = last_days[-1]
+        print(f"\nHINWEIS: {SAMPLE_DAY} hat keine Bars in diesem Zeitraum, verwende stattdessen {sample_day}.")
+
+    day_bars_utc = subset[subset.index.map(lambda ts: ts.date() == sample_day)]
     try:
-        local_subset = subset.tz_convert(BERLIN_TZ)
+        day_bars = day_bars_utc.tz_convert(BERLIN_TZ)
     except Exception as exc:
         print(f"\nFEHLER bei der Zeitzonen-Umrechnung nach {BERLIN_TZ}: {exc}")
         return 1
 
-    local_days = sorted({ts.date() for ts in local_subset.index})
-    sample_day = local_days[-1]
-    day_bars = local_subset[local_subset.index.date == sample_day]
     window_bars = day_bars.between_time(SAMPLE_WINDOW_START, SAMPLE_WINDOW_END)
 
     print(f"\n=== Stichprobe: {sample_day} ({BERLIN_TZ}), {SAMPLE_WINDOW_START}-{SAMPLE_WINDOW_END} Uhr ===")
