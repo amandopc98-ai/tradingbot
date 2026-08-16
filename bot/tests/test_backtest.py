@@ -295,3 +295,52 @@ def test_parse_args_strategy_override():
 def test_parse_args_strategy_override_defaults_to_none():
     args = parse_args(["--symbol", "GLD", "--start", "2026-07-06", "--end", "2026-07-10"])
     assert args.strategy_override is None
+
+
+def test_parse_args_trend_filter_flags():
+    args = parse_args([
+        "--symbol", "GLD", "--strategy", "opening_range_breakout",
+        "--trend-filter", "--trend-filter-period", "30",
+        "--start", "2026-07-06", "--end", "2026-07-10",
+    ])
+    assert args.trend_filter is True
+    assert args.trend_filter_period == 30
+
+
+def test_parse_args_trend_filter_flags_default_off():
+    args = parse_args(["--symbol", "GLD", "--start", "2026-07-06", "--end", "2026-07-10"])
+    assert args.trend_filter is False
+    assert args.trend_filter_period is None
+
+
+def _make_prior_day_tail(day: str, n_bars: int, price: float, end_time: str = "22:00") -> pd.DataFrame:
+    end_ts = pd.Timestamp(f"{day} {end_time}", tz="Europe/Berlin")
+    idx = pd.date_range(end=end_ts, periods=n_bars, freq="1min", tz="Europe/Berlin")
+    return pd.DataFrame({"open": price, "high": price, "low": price, "close": price, "volume": 1000.0}, index=idx)
+
+
+def test_backtester_threads_strategy_override_params_into_the_strategy():
+    # Same "blocked" scenario as the strategy-level trend-filter tests, but driven
+    # through the full Backtester.run() pipeline this time, to prove --trend-filter /
+    # --trend-filter-period (via strategy_override_params) actually reach the
+    # constructed strategy instance rather than being silently dropped.
+    prior = _make_prior_day_tail("2026-07-08", n_bars=10, price=300.0)
+    today = _make_orb_day_bars(_ORB_LONG_SETUP)
+    bars = pd.concat([prior, today]).sort_index()
+
+    cfg = _make_cfg({"GLD": GLD_CFG})
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 10, tzinfo=timezone.utc)
+
+    without_filter = Backtester(
+        cfg, _FakeClient({"GLD": bars}),
+        strategy_overrides={"GLD": "opening_range_breakout"},
+    )
+    with_filter = Backtester(
+        cfg, _FakeClient({"GLD": bars}),
+        strategy_overrides={"GLD": "opening_range_breakout"},
+        strategy_override_params={"trend_filter_enabled": True, "trend_filter_period": 50},
+    )
+
+    assert without_filter.run(["GLD"], start, end)["GLD"].num_trades == 1
+    assert with_filter.run(["GLD"], start, end)["GLD"].num_trades == 0

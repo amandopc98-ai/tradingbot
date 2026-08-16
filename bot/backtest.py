@@ -180,11 +180,15 @@ class Backtester:
         client: AlpacaClient,
         initial_equity: float = DEFAULT_INITIAL_EQUITY,
         strategy_overrides: Optional[Dict[str, str]] = None,
+        strategy_override_params: Optional[dict] = None,
     ):
         self.cfg = cfg
         self.client = client
         self.initial_equity = initial_equity
         self.strategy_overrides = strategy_overrides or {}
+        # Extra constructor kwargs (e.g. trend_filter_enabled/_period) applied to
+        # every overridden strategy in this run - see --trend-filter/--trend-filter-period.
+        self.strategy_override_params = strategy_override_params or {}
         self._entry_ts: Dict[str, str] = {}
 
     def run(self, symbols: List[str], start: datetime, end: datetime) -> Dict[str, BacktestResult]:
@@ -207,7 +211,7 @@ class Backtester:
 
             override_name = self.strategy_overrides.get(symbol)
             if override_name is not None:
-                strategy = STRATEGY_REGISTRY[override_name](symbol)
+                strategy = STRATEGY_REGISTRY[override_name](symbol, **self.strategy_override_params)
                 override_timeframe = BACKTEST_STRATEGY_DEFAULT_TIMEFRAMES.get(override_name, scfg.timeframe)
                 scfg = replace(scfg, strategy=override_name, timeframe=override_timeframe)
 
@@ -388,6 +392,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "backtest invocation. Available: " + ", ".join(sorted(STRATEGY_REGISTRY))
         ),
     )
+    parser.add_argument(
+        "--trend-filter", dest="trend_filter", action="store_true",
+        help=(
+            "Enable opening_range_breakout's optional trend filter for this run "
+            "(only has an effect together with --strategy opening_range_breakout; "
+            "off by default, matching the strategy's own default)."
+        ),
+    )
+    parser.add_argument(
+        "--trend-filter-period", dest="trend_filter_period", type=int, metavar="MINUTES",
+        help="Trend filter lookback in minutes/bars (default: 120). Implies nothing about --trend-filter itself.",
+    )
     return parser.parse_args(argv)
 
 
@@ -409,6 +425,12 @@ def main(argv: Optional[List[str]] = None) -> None:
             )
         strategy_overrides = {s: args.strategy_override for s in symbols}
 
+    strategy_override_params = {}
+    if args.trend_filter:
+        strategy_override_params["trend_filter_enabled"] = True
+    if args.trend_filter_period is not None:
+        strategy_override_params["trend_filter_period"] = args.trend_filter_period
+
     start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc)
     if end <= start:
@@ -416,7 +438,10 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    engine = Backtester(cfg, client, initial_equity=args.equity, strategy_overrides=strategy_overrides)
+    engine = Backtester(
+        cfg, client, initial_equity=args.equity,
+        strategy_overrides=strategy_overrides, strategy_override_params=strategy_override_params,
+    )
     results = engine.run(symbols, start, end)
 
     for symbol in symbols:
