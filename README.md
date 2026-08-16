@@ -57,8 +57,10 @@ bot/
                            breakout, trend following); pluggable via STRATEGY_REGISTRY
   main.py                  Poll loop: checks stops every tick, evaluates strategy signals
                            only when a new bar has closed for that symbol's timeframe
-  tests/                   Unit tests for indicators/strategies/risk using synthetic data
-                           (no network or API keys required)
+  backtest.py              Replays the same strategies/risk model over historical bars
+                           (see Backtesting below); never imported by or changes main.py
+  tests/                   Unit tests for indicators/strategies/risk/backtest using
+                           synthetic data (no network or API keys required)
 ```
 
 Each strategy only looks at price history and the current position side, and returns
@@ -100,6 +102,33 @@ edit for local setup.
    state persists to `portfolio_state.json` so a restart doesn't lose trailing-stop
    tracking; on startup the bot reconciles that file against Alpaca's actual open
    positions.
+
+## Backtesting
+
+`bot/backtest.py` replays the live strategies over historical Alpaca bar data. It
+reuses the exact same `bot/strategies/*` classes, `bot/risk_manager.py` functions, and
+`bot/portfolio.py` position bookkeeping the live bot uses (even importing
+`build_strategies()` / `shorting_allowed()` from `bot/main.py` directly) so a backtest
+can't silently drift out of sync with live behavior. It never modifies `bot/main.py`
+or writes to `portfolio_state.json`.
+
+```bash
+python -m bot.backtest --symbol SPY --start 2023-01-01 --end 2024-01-01
+```
+
+- Omit `--symbol` to backtest all 5 configured symbols; pass `--symbol` multiple times
+  to backtest several together (e.g. `--symbol SPY --symbol QQQ --symbol BTC/USD`) —
+  symbols backtested together share one portfolio, so the SPY/QQQ-blocks-BTC
+  correlation filter is only meaningful when they're run in the same command.
+- `--equity` sets the starting simulated equity per symbol (default 100,000).
+- `--output-dir` sets where equity-curve CSVs are written (default `backtests/`, which
+  is gitignored).
+
+For each symbol it prints total return, win rate, number of trades, and max drawdown,
+and writes a timestamp/equity CSV you can plot yourself. See the module docstring in
+`bot/backtest.py` for the documented fidelity trade-offs (e.g. stops are checked once
+per closed bar using that bar's close price, since only OHLC bar data is available —
+the live bot checks on every poll tick using the latest trade price).
 
 ## Configuration reference (`.env`)
 
