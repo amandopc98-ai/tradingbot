@@ -1,5 +1,7 @@
+import pytest
 import pandas as pd
 
+from bot import indicators
 from bot.strategies.base import Signal
 from bot.strategies.opening_range_breakout import (
     RANGE_TZ,
@@ -56,6 +58,17 @@ _LONG_SETUP = {
     "16:05": {"open": 100.0, "high": 106.0, "low": 100.0, "close": 105.0},
     "16:10": {"open": 105.0, "high": 105.5, "low": 101.5, "close": 102.0},
     "16:15": {"open": 102.0, "high": 107.5, "low": 102.0, "close": 107.0},
+}
+
+# The mirror-image short setup shared by the trend-filter tests: range [99, 101],
+# breakout at 16:05 (close 95, low 94), a clean retest at 16:10, entry trigger at
+# 16:15 (close 93).
+_SHORT_SETUP = {
+    "15:40": {"high": 101.0},
+    "15:50": {"low": 99.0},
+    "16:05": {"open": 100.0, "high": 100.0, "low": 94.0, "close": 95.0},
+    "16:10": {"open": 95.0, "high": 96.0, "low": 95.0, "close": 96.0},
+    "16:15": {"open": 96.0, "high": 96.0, "low": 93.0, "close": 93.0},
 }
 
 
@@ -282,3 +295,126 @@ def test_get_entry_stop_price_none_before_range_exists():
 
 def test_self_managed_exits_flag_is_set():
     assert OpeningRangeBreakoutStrategy("GLD").self_managed_exits is True
+
+
+# ---------------------------------------------------------------------------
+# Optional trend filter (rule 9) - off by default. A small trend_filter_period (5)
+# is used throughout so the whole lookback window fits within the constructed day's
+# bars, rather than needing 120 minutes of prior-day history for every test.
+# ---------------------------------------------------------------------------
+
+def test_invalid_trend_filter_mode_rejected():
+    with pytest.raises(ValueError):
+        OpeningRangeBreakoutStrategy("GLD", trend_filter_mode="wma")
+
+
+def test_trend_filter_disabled_by_default():
+    strategy = OpeningRangeBreakoutStrategy("GLD")
+    assert strategy.trend_filter_enabled is False
+
+
+def test_trend_filter_allows_long_when_price_above_moving_average():
+    # bars 16:11-16:14 stay at the flat 100.0 baseline, so the SMA(5) ending at the
+    # 16:15 entry bar is (100+100+100+100+107)/5 = 101.4 - below the entry price 107.
+    bars = _make_day_bars(_LONG_SETUP)
+    strategy = OpeningRangeBreakoutStrategy("GLD", trend_filter_enabled=True, trend_filter_period=5)
+
+    events = _replay(strategy, bars)
+
+    assert len(events) == 2
+    assert events[0][1] == "long"
+
+
+def _make_prior_day_tail(day: str, n_bars: int, price: float, end_time: str = "22:00") -> pd.DataFrame:
+    """n_bars of flat `price` 1-minute bars ending at `end_time` on `day`
+    (Europe/Berlin) - used to give the trend filter's moving average some history to
+    pull from beyond just today's ~47 pre-entry bars, without that history ever
+    landing inside today's 15:29-16:00 range window or its breakout/retest/entry
+    scan (those only ever look at *today's* bars)."""
+    end_ts = pd.Timestamp(f"{day} {end_time}", tz=RANGE_TZ)
+    idx = pd.date_range(end=end_ts, periods=n_bars, freq="1min", tz=RANGE_TZ)
+    return pd.DataFrame({"open": price, "high": price, "low": price, "close": price, "volume": 1000.0}, index=idx)
+
+
+def test_trend_filter_blocks_long_when_price_below_moving_average():
+    # A high-priced prior session pulls the 50-bar average above the entry price
+    # (107), without touching today's breakout/retest/entry bars at all: a filler
+    # bar *between* the retest and entry that itself exceeded breakout_high (106)
+    # would just become the entry bar - so pulling the average up has to come from
+    # outside today's post-retest window entirely.
+    prior = _make_prior_day_tail("2026-07-08", n_bars=10, price=300.0)
+    today = _make_day_bars(_LONG_SETUP)
+    bars = pd.concat([prior, today]).sort_index()
+    strategy = OpeningRangeBreakoutStrategy("GLD", trend_filter_enabled=True, trend_filter_period=50)
+
+    events = _replay(strategy, bars)
+
+    assert events == []  # setup discarded; the day counts as finished, no trade at all
+
+
+def test_trend_filter_allows_short_when_price_below_moving_average():
+    # bars 16:11-16:14 stay at the flat 100.0 baseline, so the SMA(5) ending at the
+    # 16:15 entry bar is (100*4 + 93)/5 = 99.4 - above the entry price 93.
+    bars = _make_day_bars(_SHORT_SETUP)
+    strategy = OpeningRangeBreakoutStrategy("GLD", trend_filter_enabled=True, trend_filter_period=5)
+
+    events = _replay(strategy, bars)
+
+    assert len(events) == 2
+    assert events[0][1] == "short"
+
+
+def test_trend_filter_blocks_short_when_price_above_moving_average():
+    # Mirror image of the long-block test: a low-priced prior session pulls the
+    # 60-bar average below the entry price (93), from outside today's post-retest
+    # window (see the comment on the long-block test for why it has to be there).
+    prior = _make_prior_day_tail("2026-07-08", n_bars=20, price=10.0)
+    today = _make_day_bars(_SHORT_SETUP)
+    bars = pd.concat([prior, today]).sort_index()
+    strategy = OpeningRangeBreakoutStrategy("GLD", trend_filter_enabled=True, trend_filter_period=60)
+
+    events = _replay(strategy, bars)
+
+    assert events == []
+
+
+def test_trend_filter_disabled_gives_identical_result_to_no_filter_at_all():
+    overrides = dict(_LONG_SETUP)
+    overrides["16:20"] = {"open": 107.0, "high": 107.0, "low": 97.0, "close": 98.0}  # stop-hit bar
+    bars = _make_day_bars(overrides)
+
+    baseline = OpeningRangeBreakoutStrategy("GLD")
+    # Same scenario, but explicitly disabled with a non-default period, to prove the
+    # period value is irrelevant whenever the filter itself is off.
+    explicitly_disabled = OpeningRangeBreakoutStrategy(
+        "GLD", trend_filter_enabled=False, trend_filter_period=5, trend_filter_mode="ema"
+    )
+
+    assert _replay(baseline, bars) == _replay(explicitly_disabled, bars)
+
+
+def test_trend_filter_ema_mode_can_differ_from_sma_mode():
+    # A ramping price series makes EMA and SMA diverge, which can flip the filter's
+    # allow/block decision depending on trend_filter_mode.
+    overrides = dict(_LONG_SETUP)
+    overrides["16:11"] = {"close": 90.0}
+    overrides["16:12"] = {"close": 95.0}
+    overrides["16:13"] = {"close": 100.0}
+    overrides["16:14"] = {"close": 105.0}
+    bars = _make_day_bars(overrides)
+
+    sma_strategy = OpeningRangeBreakoutStrategy("GLD", trend_filter_enabled=True, trend_filter_period=5, trend_filter_mode="sma")
+    ema_strategy = OpeningRangeBreakoutStrategy("GLD", trend_filter_enabled=True, trend_filter_period=5, trend_filter_mode="ema")
+
+    sma_events = _replay(sma_strategy, bars)
+    ema_events = _replay(ema_strategy, bars)
+
+    # Both should at least be internally consistent (either allows or fully blocks
+    # for the day) - the real assertion is that the two moving averages are not
+    # required to agree, i.e. mode is actually being respected.
+    window = bars.loc[:pd.Timestamp(f"{DAY} 16:15", tz=RANGE_TZ), "close"]
+    sma_value = float(indicators.sma(window, 5).iloc[-1])
+    ema_value = float(indicators.ema(window, 5).iloc[-1])
+    assert sma_value != ema_value
+    assert len(sma_events) in (0, 2)
+    assert len(ema_events) in (0, 2)

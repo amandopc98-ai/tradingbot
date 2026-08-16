@@ -138,6 +138,13 @@ python -m bot.backtest --symbol SPY --start 2023-01-01 --end 2024-01-01
   take-profit aren't ATR-based (currently only `opening_range_breakout`) manage their
   own exits internally instead of the shared ATR stop — see the `self_managed_exits`
   note in `bot/backtest.py`'s module docstring.
+- `--trend-filter` / `--trend-filter-period MINUTES` configure `opening_range_breakout`'s
+  optional trend filter for this run (off by default, matching the strategy's own
+  default): when enabled, an entry is only taken if price is above (long) or below
+  (short) the SMA/EMA of the last `trend_filter_period` 1-minute bars (default 120);
+  otherwise that day's setup is discarded. Only has an effect together with
+  `--strategy opening_range_breakout`. Example:
+  `--symbol GLD --strategy opening_range_breakout --trend-filter --trend-filter-period 60`.
 
 For each symbol it prints total return, win rate, number of trades, and max drawdown,
 and writes a timestamp/equity CSV you can plot yourself. See the module docstring in

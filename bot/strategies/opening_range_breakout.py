@@ -21,6 +21,13 @@ Rules (as specified):
   7. Take-profit: entry +/- `take_profit_r_multiple` x (entry - stop distance),
      default 1.8.
   8. At most one trade per day; any open position is force-closed at end of day.
+  9. Optional trend filter (off by default - trend_filter_enabled=False preserves
+     the exact behavior above): if enabled, at the moment an entry would otherwise
+     fire, compute an SMA or EMA (trend_filter_mode) over the last
+     trend_filter_period 1-minute bars (default 120) ending at the entry bar. A long
+     entry requires price above that average, a short entry requires price below it;
+     otherwise the setup is discarded for the day - like a rejected entry, this does
+     not roll forward to a later bar (see "stateless" note below for why).
 
 Interface: identical to every other strategy - generate_signal(bars, position_side)
 -> Signal, using only the shared Signal enum (LONG/SHORT/EXIT/HOLD). No changes to
@@ -59,6 +66,7 @@ from typing import Optional
 
 import pandas as pd
 
+from bot import indicators
 from bot.strategies.base import Signal, Strategy
 
 RANGE_TZ = "Europe/Berlin"
@@ -69,6 +77,9 @@ EOD_TZ = "America/New_York"
 EOD_CUTOFF_TIME = dt_time(15, 55)  # a few minutes ahead of the 16:00 ET close, as a safety margin
 
 DEFAULT_TAKE_PROFIT_R_MULTIPLE = 1.8
+DEFAULT_TREND_FILTER_PERIOD = 120  # minutes == bars, since this strategy is 1-minute only
+DEFAULT_TREND_FILTER_MODE = "sma"
+VALID_TREND_FILTER_MODES = ("sma", "ema")
 
 # Not a "warm-up" requirement like trend_following's EMA - this strategy only ever
 # looks at *today's* bars. It needs to be large enough that bot/backtest.py's bounded
@@ -178,18 +189,41 @@ def _compute_day_state(today_bars: pd.DataFrame, take_profit_r_multiple: float) 
 class OpeningRangeBreakoutStrategy(Strategy):
     self_managed_exits = True  # see module docstring: fixed range-based stop/target, not ATR
 
-    def __init__(self, symbol: str, take_profit_r_multiple: float = DEFAULT_TAKE_PROFIT_R_MULTIPLE):
-        super().__init__(symbol, take_profit_r_multiple=take_profit_r_multiple)
+    def __init__(
+        self,
+        symbol: str,
+        take_profit_r_multiple: float = DEFAULT_TAKE_PROFIT_R_MULTIPLE,
+        trend_filter_enabled: bool = False,
+        trend_filter_period: int = DEFAULT_TREND_FILTER_PERIOD,
+        trend_filter_mode: str = DEFAULT_TREND_FILTER_MODE,
+    ):
+        if trend_filter_mode not in VALID_TREND_FILTER_MODES:
+            raise ValueError(f"trend_filter_mode must be one of {VALID_TREND_FILTER_MODES}, got {trend_filter_mode!r}")
+        super().__init__(
+            symbol,
+            take_profit_r_multiple=take_profit_r_multiple,
+            trend_filter_enabled=trend_filter_enabled,
+            trend_filter_period=trend_filter_period,
+            trend_filter_mode=trend_filter_mode,
+        )
         self.take_profit_r_multiple = take_profit_r_multiple
+        self.trend_filter_enabled = trend_filter_enabled
+        self.trend_filter_period = trend_filter_period
+        self.trend_filter_mode = trend_filter_mode
 
     @property
     def min_bars(self) -> int:
-        return MIN_BARS
+        # Comfortably covers a full trading day (see MIN_BARS above); also widened
+        # for an unusually large trend_filter_period so its lookback is never
+        # truncated out of the replay window bot/backtest.py hands us.
+        return max(MIN_BARS, self.trend_filter_period + 5)
 
-    def _today_bars(self, bars: pd.DataFrame) -> pd.DataFrame:
+    def _to_local(self, bars: pd.DataFrame) -> pd.DataFrame:
         if bars.index.tz is None:
             bars = bars.tz_localize("UTC")
-        bars_local = bars.tz_convert(RANGE_TZ)
+        return bars.tz_convert(RANGE_TZ)
+
+    def _today_bars(self, bars_local: pd.DataFrame) -> pd.DataFrame:
         today = bars_local.index[-1].date()
         return bars_local[bars_local.index.date == today]
 
@@ -199,12 +233,39 @@ class OpeningRangeBreakoutStrategy(Strategy):
         last_local = bars.tz_convert(EOD_TZ).index[-1]
         return last_local.time() >= EOD_CUTOFF_TIME
 
+    def _passes_trend_filter(self, bars_local: pd.DataFrame, entry_ts: pd.Timestamp, direction: str) -> bool:
+        """Rule 9. bars_local: the full (possibly multi-day) bars already converted
+        to RANGE_TZ, so its index is directly comparable to entry_ts. Deliberately
+        allowed to look across a day boundary into prior-session bars when
+        trend_filter_period is larger than how much of today has traded so far -
+        "the last N *traded* minutes", not "the last N minutes of today only"."""
+        if not self.trend_filter_enabled:
+            return True
+
+        window = bars_local[bars_local.index <= entry_ts]
+        if len(window) < self.trend_filter_period:
+            return False  # not enough history to compute the filter yet - block conservatively
+
+        closes = window["close"]
+        if self.trend_filter_mode == "ema":
+            ma_series = indicators.ema(closes, self.trend_filter_period)
+        else:
+            ma_series = indicators.sma(closes, self.trend_filter_period)
+
+        ma_value = float(ma_series.iloc[-1])
+        if pd.isna(ma_value):
+            return False
+
+        price = float(closes.iloc[-1])
+        return price > ma_value if direction == "long" else price < ma_value
+
     def get_entry_stop_price(self, bars: pd.DataFrame, side: str) -> Optional[float]:
         """Used by bot/backtest.py (only for self_managed_exits strategies) to size
         the position using this strategy's own stop distance instead of an ATR one.
         Expected to be called with the same `bars` right after generate_signal
         returned LONG/SHORT for them."""
-        today_bars = self._today_bars(bars)
+        bars_local = self._to_local(bars)
+        today_bars = self._today_bars(bars_local)
         state = _compute_day_state(today_bars, self.take_profit_r_multiple)
         if state is None:
             return None
@@ -214,7 +275,8 @@ class OpeningRangeBreakoutStrategy(Strategy):
         if bars.empty:
             return Signal.HOLD
 
-        today_bars = self._today_bars(bars)
+        bars_local = self._to_local(bars)
+        today_bars = self._today_bars(bars_local)
         state = _compute_day_state(today_bars, self.take_profit_r_multiple)
         current_ts = today_bars.index[-1] if not today_bars.empty else None
         current_close = float(bars["close"].iloc[-1])
@@ -239,8 +301,14 @@ class OpeningRangeBreakoutStrategy(Strategy):
 
         # Flat: only signal on the exact bar where today's entry condition first
         # fires - on every later bar that same entry_ts is in the past, so this
-        # naturally enforces "at most one trade per day" with no extra state.
+        # naturally enforces "at most one trade per day" with no extra state. A
+        # trend-filter rejection reuses the same mechanism: entry_ts doesn't change
+        # on a later call, so once rejected it's rejected for the rest of the day.
         if state is None or state.entry_ts is None or state.entry_ts != current_ts:
             return Signal.HOLD
 
-        return Signal.LONG if state.breakout_direction == "long" else Signal.SHORT
+        direction = state.breakout_direction
+        if not self._passes_trend_filter(bars_local, state.entry_ts, direction):
+            return Signal.HOLD
+
+        return Signal.LONG if direction == "long" else Signal.SHORT
