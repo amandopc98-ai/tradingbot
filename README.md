@@ -29,7 +29,7 @@ not wired into any symbol's live mapping above. It trades the 15:29-16:00
 Europe/Berlin opening range: waits for a close beyond the range, then a retest of
 the broken level, then enters on a close back through the breakout bar's extreme,
 with a fixed stop at the opposite range boundary and a take-profit at a configurable
-R-multiple (default 1.8x risk). See **Backtesting** below for how to run it.
+`reward_risk_ratio` (default 1.8x risk). See **Backtesting** below for how to run it.
 
 ## Risk management
 
@@ -150,6 +150,9 @@ python -m bot.backtest --symbol SPY --start 2023-01-01 --end 2024-01-01
   otherwise that day's setup is discarded. Only has an effect together with
   `--strategy opening_range_breakout`. Example:
   `--symbol GLD --strategy opening_range_breakout --trend-filter --trend-filter-period 60`.
+- `--reward-risk-ratio RATIO` overrides `opening_range_breakout`'s take-profit
+  distance as a multiple of its stop distance (default 1.8). Only has an effect
+  together with `--strategy opening_range_breakout`.
 
 For each symbol it prints total return, win rate, number of trades, and max drawdown,
 and writes a timestamp/equity CSV you can plot yourself. See the module docstring in

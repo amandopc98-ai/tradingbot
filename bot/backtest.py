@@ -211,8 +211,9 @@ class Backtester:
         self.client = client
         self.initial_equity = initial_equity
         self.strategy_overrides = strategy_overrides or {}
-        # Extra constructor kwargs (e.g. trend_filter_enabled/_period) applied to
-        # every overridden strategy in this run - see --trend-filter/--trend-filter-period.
+        # Extra constructor kwargs (e.g. trend_filter_enabled/_period,
+        # reward_risk_ratio) applied to every overridden strategy in this run - see
+        # --trend-filter/--trend-filter-period/--reward-risk-ratio.
         self.strategy_override_params = strategy_override_params or {}
         self._entry_ts: Dict[str, str] = {}
 
@@ -445,6 +446,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--trend-filter-period", dest="trend_filter_period", type=int, metavar="MINUTES",
         help="Trend filter lookback in minutes/bars (default: 120). Implies nothing about --trend-filter itself.",
     )
+    parser.add_argument(
+        "--reward-risk-ratio", dest="reward_risk_ratio", type=float, metavar="RATIO",
+        help=(
+            "opening_range_breakout's take-profit distance as a multiple of the "
+            "stop distance (default: 1.8). Only has an effect together with "
+            "--strategy opening_range_breakout."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -478,6 +487,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         strategy_override_params["trend_filter_enabled"] = True
     if args.trend_filter_period is not None:
         strategy_override_params["trend_filter_period"] = args.trend_filter_period
+    if args.reward_risk_ratio is not None:
+        strategy_override_params["reward_risk_ratio"] = args.reward_risk_ratio
 
     start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc)

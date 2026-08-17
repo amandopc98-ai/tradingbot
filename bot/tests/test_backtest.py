@@ -348,6 +348,79 @@ def test_backtester_threads_strategy_override_params_into_the_strategy():
 
 
 # ---------------------------------------------------------------------------
+# --reward-risk-ratio
+# ---------------------------------------------------------------------------
+
+def test_parse_args_reward_risk_ratio():
+    args = parse_args([
+        "--symbol", "GLD", "--strategy", "opening_range_breakout",
+        "--reward-risk-ratio", "3.0",
+        "--start", "2026-07-06", "--end", "2026-07-10",
+    ])
+    assert args.reward_risk_ratio == 3.0
+
+
+def test_parse_args_reward_risk_ratio_defaults_to_none():
+    args = parse_args(["--symbol", "GLD", "--start", "2026-07-06", "--end", "2026-07-10"])
+    assert args.reward_risk_ratio is None
+
+
+def test_reward_risk_ratio_override_changes_trade_outcome():
+    # Entry at 107, stop at 99 (range_low) -> risk = 8. At the default ratio (1.8)
+    # the target is 107 + 1.8*8 = 121.4. A bar reaching 115 clears a 1.0-ratio target
+    # (107 + 1.0*8 = 115) but falls well short of the default 1.8-ratio target, so
+    # the same bars must produce a different exit depending on the ratio used.
+    overrides = dict(_ORB_LONG_SETUP)
+    overrides["16:20"] = {"open": 107.0, "high": 115.0, "low": 107.0, "close": 115.0}
+    bars = _make_orb_day_bars(overrides)
+
+    cfg = _make_cfg({"GLD": GLD_CFG})
+    start = datetime(2026, 7, 9, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 10, tzinfo=timezone.utc)
+
+    default_ratio = Backtester(cfg, _FakeClient({"GLD": bars}), strategy_overrides={"GLD": "opening_range_breakout"})
+    tighter_ratio = Backtester(
+        cfg, _FakeClient({"GLD": bars}),
+        strategy_overrides={"GLD": "opening_range_breakout"},
+        strategy_override_params={"reward_risk_ratio": 1.0},
+    )
+
+    default_trade = default_ratio.run(["GLD"], start, end)["GLD"].trades[0]
+    tighter_trade = tighter_ratio.run(["GLD"], start, end)["GLD"].trades[0]
+
+    assert tighter_trade.exit_price == 115.0
+    assert tighter_trade.exit_time == pd.Timestamp("2026-07-09 16:20", tz="Europe/Berlin").isoformat()
+    # the default ratio's target (121.4) is never reached by these bars, so it only
+    # closes later, at a different price, via end-of-day or a subsequent bar - not
+    # the same outcome as the tighter ratio.
+    assert default_trade.exit_time != tighter_trade.exit_time
+    assert default_trade.exit_price != tighter_trade.exit_price
+
+
+def test_reward_risk_ratio_default_reproduces_prior_behavior_exactly():
+    # Reaches the *default* (1.8) target exactly: 107 + 1.8*8 = 121.4.
+    overrides = dict(_ORB_LONG_SETUP)
+    overrides["16:25"] = {"open": 107.0, "high": 122.0, "low": 107.0, "close": 122.0}
+    bars = _make_orb_day_bars(overrides)
+
+    cfg = _make_cfg({"GLD": GLD_CFG})
+    start = datetime(2026, 7, 9, tzinfo=timezone.utc)
+    end = datetime(2026, 7, 10, tzinfo=timezone.utc)
+
+    implicit_default = Backtester(cfg, _FakeClient({"GLD": bars}), strategy_overrides={"GLD": "opening_range_breakout"})
+    explicit_default = Backtester(
+        cfg, _FakeClient({"GLD": bars}),
+        strategy_overrides={"GLD": "opening_range_breakout"},
+        strategy_override_params={"reward_risk_ratio": 1.8},
+    )
+
+    implicit_trades = implicit_default.run(["GLD"], start, end)["GLD"].trades
+    explicit_trades = explicit_default.run(["GLD"], start, end)["GLD"].trades
+
+    assert implicit_trades == explicit_trades
+
+
+# ---------------------------------------------------------------------------
 # --symbol for a symbol that isn't in config.py, with and without --strategy
 # ---------------------------------------------------------------------------
 
