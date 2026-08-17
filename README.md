@@ -128,6 +128,11 @@ python -m bot.backtest --symbol SPY --start 2023-01-01 --end 2024-01-01
   to backtest several together (e.g. `--symbol SPY --symbol QQQ --symbol BTC/USD`) —
   symbols backtested together share one portfolio, so the SPY/QQQ-blocks-BTC
   correlation filter is only meaningful when they're run in the same command.
+- `--symbol` isn't limited to the 5 configured symbols — any symbol works as long as
+  `--strategy` is given for it too (e.g. `--symbol XLE --strategy mean_reversion`),
+  since there's otherwise no way to know which strategy/timeframe to use for it. A
+  symbol that's neither in `config.py` nor given a `--strategy` gets a clear error
+  instead of running.
 - `--equity` sets the starting simulated equity per symbol (default 100,000).
 - `--output-dir` sets where equity-curve CSVs are written (default `backtests/`, which
   is gitignored).

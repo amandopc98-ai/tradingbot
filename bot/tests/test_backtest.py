@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import pytest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from bot.backtest import Backtester, BacktestResult, DEFAULT_INITIAL_EQUITY, Trade, _lookback_start, _save_equity_curve, parse_args
@@ -344,3 +345,74 @@ def test_backtester_threads_strategy_override_params_into_the_strategy():
 
     assert without_filter.run(["GLD"], start, end)["GLD"].num_trades == 1
     assert with_filter.run(["GLD"], start, end)["GLD"].num_trades == 0
+
+
+# ---------------------------------------------------------------------------
+# --symbol for a symbol that isn't in config.py, with and without --strategy
+# ---------------------------------------------------------------------------
+
+def _xle_mean_reversion_bars():
+    base = datetime(2023, 1, 3, tzinfo=timezone.utc)
+    n = 60
+    idx = [base + timedelta(minutes=15 * i) for i in range(n)]
+    closes = [99.0 if i % 2 == 0 else 101.0 for i in range(n)]
+    dip_i = 45
+    closes[dip_i] = 60.0       # triggers a long entry (z far below -1.5)
+    closes[dip_i + 3] = 100.0  # reverts to the mean -> strategy exit
+    return idx, _make_bars(idx, closes)
+
+
+def test_backtester_runs_unconfigured_symbol_when_strategy_override_given():
+    # "XLE" has no entry at all in cfg.symbols - only --strategy makes it runnable.
+    idx, bars = _xle_mean_reversion_bars()
+    cfg = _make_cfg({"GLD": GLD_CFG})  # XLE deliberately absent
+    client = _FakeClient({"XLE": bars})
+    engine = Backtester(cfg, client, strategy_overrides={"XLE": "mean_reversion"})
+
+    results = engine.run(["XLE"], idx[40], idx[-1])
+    result = results["XLE"]
+
+    assert result.num_trades == 1
+    trade = result.trades[0]
+    assert trade.side == "long"
+    assert trade.pnl > 0
+
+
+def test_backtester_raises_clear_error_for_unconfigured_symbol_without_strategy():
+    cfg = _make_cfg({"GLD": GLD_CFG})
+    client = _FakeClient({})
+    engine = Backtester(cfg, client)  # no strategy_overrides at all
+
+    with pytest.raises(ValueError, match="XLE"):
+        engine.run(["XLE"], datetime(2023, 1, 1, tzinfo=timezone.utc), datetime(2023, 1, 2, tzinfo=timezone.utc))
+
+
+def test_main_exits_with_clear_message_for_unconfigured_symbol_without_strategy(monkeypatch):
+    import bot.backtest as backtest_module
+
+    cfg = _make_cfg({"GLD": GLD_CFG})
+    monkeypatch.setattr(backtest_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(backtest_module, "AlpacaClient", lambda cfg: _FakeClient({}))
+
+    with pytest.raises(SystemExit) as exc_info:
+        backtest_module.main(["--symbol", "XLE", "--start", "2026-07-06", "--end", "2026-07-10"])
+
+    message = str(exc_info.value)
+    assert "XLE" in message
+    assert "--strategy" in message
+
+
+def test_main_accepts_unconfigured_symbol_when_strategy_given(monkeypatch, tmp_path):
+    import bot.backtest as backtest_module
+
+    idx, bars = _xle_mean_reversion_bars()
+    cfg = _make_cfg({"GLD": GLD_CFG})
+    monkeypatch.setattr(backtest_module, "load_config", lambda: cfg)
+    monkeypatch.setattr(backtest_module, "AlpacaClient", lambda cfg: _FakeClient({"XLE": bars}))
+
+    # Should run through to completion (no SystemExit) once --strategy is given.
+    backtest_module.main([
+        "--symbol", "XLE", "--strategy", "mean_reversion",
+        "--start", "2023-01-01", "--end", "2023-01-10",
+        "--output-dir", str(tmp_path),
+    ])
