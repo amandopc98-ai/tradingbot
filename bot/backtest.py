@@ -74,11 +74,14 @@ from config import Config, SymbolConfig, load_config
 DEFAULT_INITIAL_EQUITY = 100_000.0
 STOP_CHECK_WINDOW = 20  # mirrors main.py's client.get_bars(..., limit=20) for the stop-loss ATR
 
-# Only consulted for strategies passed via --strategy that aren't already some
-# symbol's live default (see config.py's _default_symbols()) - i.e. a strategy this
-# backtest is exploring "off label" for a symbol. Purely additive; doesn't touch
-# config.py or change any symbol's live timeframe.
+# The timeframe a --strategy override fetches bars at - covers every strategy in
+# STRATEGY_REGISTRY, since an override may be used on a symbol with no config.py
+# entry of its own to fall back on (see _synthetic_symbol_config below). Purely
+# additive; doesn't touch config.py or change any symbol's live timeframe.
 BACKTEST_STRATEGY_DEFAULT_TIMEFRAMES = {
+    "mean_reversion": TimeFrame(15, TimeFrameUnit.Minute),
+    "momentum_breakout": TimeFrame.Hour,
+    "trend_following": TimeFrame(4, TimeFrameUnit.Hour),
     "opening_range_breakout": TimeFrame.Minute,
 }
 
@@ -87,6 +90,28 @@ _TIMEFRAME_UNIT_SECONDS = {
     TimeFrameUnit.Hour: 3600,
     TimeFrameUnit.Day: 86400,
 }
+
+
+def _default_asset_class(symbol: str) -> str:
+    """Same convention config.py's live symbols already follow: only the crypto
+    pair uses slash notation (e.g. "BTC/USD"), everything else is an equity."""
+    return "crypto" if "/" in symbol else "stock"
+
+
+def _synthetic_symbol_config(symbol: str, strategy_name: str) -> SymbolConfig:
+    """Built only for --symbol values with no entry in config.py's live mapping,
+    and only ever when --strategy was explicitly given for them (see
+    Backtester.run()). Uses conservative defaults - no trailing stop, and
+    SymbolConfig's own default 30% max allocation - since there's no live config to
+    read them from."""
+    timeframe = BACKTEST_STRATEGY_DEFAULT_TIMEFRAMES.get(strategy_name, TimeFrame(15, TimeFrameUnit.Minute))
+    return SymbolConfig(
+        strategy=strategy_name,
+        timeframe=timeframe,
+        asset_class=_default_asset_class(symbol),
+        params={},
+        trail_atr_mult=None,
+    )
 
 
 @dataclass
@@ -206,14 +231,26 @@ class Backtester:
         events = []  # (timestamp, symbol, row_index), merged and time-sorted across all requested symbols
 
         for symbol in symbols:
-            scfg = self.cfg.symbols[symbol]
-            strategy = strategies[symbol]
-
             override_name = self.strategy_overrides.get(symbol)
-            if override_name is not None:
+
+            if symbol in self.cfg.symbols:
+                scfg = self.cfg.symbols[symbol]
+                strategy = strategies[symbol]
+                if override_name is not None:
+                    strategy = STRATEGY_REGISTRY[override_name](symbol, **self.strategy_override_params)
+                    override_timeframe = BACKTEST_STRATEGY_DEFAULT_TIMEFRAMES.get(override_name, scfg.timeframe)
+                    scfg = replace(scfg, strategy=override_name, timeframe=override_timeframe)
+            elif override_name is not None:
+                # Not one of config.py's live symbols - only reachable with an
+                # explicit --strategy for it (see main()'s validation, and the
+                # matching check right here for any caller that skips main()).
                 strategy = STRATEGY_REGISTRY[override_name](symbol, **self.strategy_override_params)
-                override_timeframe = BACKTEST_STRATEGY_DEFAULT_TIMEFRAMES.get(override_name, scfg.timeframe)
-                scfg = replace(scfg, strategy=override_name, timeframe=override_timeframe)
+                scfg = _synthetic_symbol_config(symbol, override_name)
+            else:
+                raise ValueError(
+                    f"No strategy for '{symbol}': it isn't one of config.py's live symbols "
+                    f"({', '.join(self.cfg.symbols)}) and no --strategy override was given for it."
+                )
 
             entry_window = strategy.min_bars + 5
 
@@ -371,7 +408,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--symbol", action="append", dest="symbols", metavar="SYMBOL",
-        help="Symbol to backtest (e.g. SPY, BTC/USD). Repeatable. Omit to backtest all 5 configured symbols.",
+        help=(
+            "Symbol to backtest (e.g. SPY, BTC/USD). Repeatable. Omit to backtest all "
+            "5 configured symbols. A symbol not in config.py's live mapping also "
+            "works, as long as --strategy is given for it."
+        ),
     )
     parser.add_argument("--start", required=True, help="Start date, YYYY-MM-DD")
     parser.add_argument("--end", required=True, help="End date, YYYY-MM-DD")
@@ -413,9 +454,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     client = AlpacaClient(cfg)
 
     symbols = args.symbols or list(cfg.symbols.keys())
-    unknown = [s for s in symbols if s not in cfg.symbols]
-    if unknown:
-        raise SystemExit(f"Unknown symbol(s): {', '.join(unknown)}. Configured symbols: {', '.join(cfg.symbols)}")
 
     strategy_overrides: Dict[str, str] = {}
     if args.strategy_override:
@@ -424,6 +462,16 @@ def main(argv: Optional[List[str]] = None) -> None:
                 f"Unknown --strategy '{args.strategy_override}'. Available: {', '.join(sorted(STRATEGY_REGISTRY))}"
             )
         strategy_overrides = {s: args.strategy_override for s in symbols}
+
+    # A symbol only needs *either* a config.py entry *or* an explicit --strategy -
+    # any --symbol not in config.py is fine as long as --strategy was given.
+    unresolvable = [s for s in symbols if s not in cfg.symbols and s not in strategy_overrides]
+    if unresolvable:
+        raise SystemExit(
+            f"No strategy for {', '.join(unresolvable)}: not in config.py's live symbols "
+            f"({', '.join(cfg.symbols)}) and no --strategy override given for them. "
+            f"Pass --strategy to backtest a symbol that isn't in config.py."
+        )
 
     strategy_override_params = {}
     if args.trend_filter:
@@ -445,7 +493,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     results = engine.run(symbols, start, end)
 
     for symbol in symbols:
-        effective_strategy_name = strategy_overrides.get(symbol, cfg.symbols[symbol].strategy)
+        # Not .get(symbol, cfg.symbols[symbol].strategy): that default expression
+        # would be evaluated eagerly even when symbol is in strategy_overrides,
+        # raising a KeyError for a --strategy-only symbol with no config.py entry.
+        if symbol in strategy_overrides:
+            effective_strategy_name = strategy_overrides[symbol]
+        else:
+            effective_strategy_name = cfg.symbols[symbol].strategy
         _print_report(symbol, effective_strategy_name, start, end, results[symbol])
         path = _save_equity_curve(results[symbol], symbol, start, end, args.output_dir)
         print(f"Equity curve saved to: {path}")
