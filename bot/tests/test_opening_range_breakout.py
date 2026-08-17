@@ -79,7 +79,7 @@ _SHORT_SETUP = {
 def test_range_is_high_low_of_1529_to_1600_window():
     bars = _make_day_bars({"15:40": {"high": 103.5}, "15:50": {"low": 97.5}}, end_time="16:00")
     today_bars = bars  # already exactly the range window's day
-    state = _compute_day_state(today_bars, take_profit_r_multiple=1.8)
+    state = _compute_day_state(today_bars, reward_risk_ratio=1.8)
     assert state is not None
     assert state.range_high == 103.5
     assert state.range_low == 97.5
@@ -166,7 +166,7 @@ def test_retest_bar_that_also_closes_above_breakout_high_does_not_self_trigger_e
 
 def test_entry_stop_and_target_prices_for_long():
     bars = _make_day_bars(_LONG_SETUP)
-    state = _compute_day_state(bars, take_profit_r_multiple=1.8)
+    state = _compute_day_state(bars, reward_risk_ratio=1.8)
     assert state.entry_ts == pd.Timestamp(f"{DAY} 16:15", tz=RANGE_TZ)
     entry_price = 107.0
     assert state.stop_price == 99.0  # range_low
@@ -174,10 +174,10 @@ def test_entry_stop_and_target_prices_for_long():
     assert state.target_price == entry_price + 1.8 * risk_amount
 
 
-def test_take_profit_multiple_is_configurable():
+def test_reward_risk_ratio_is_configurable():
     bars = _make_day_bars(_LONG_SETUP)
-    state_default = _compute_day_state(bars, take_profit_r_multiple=1.8)
-    state_custom = _compute_day_state(bars, take_profit_r_multiple=3.0)
+    state_default = _compute_day_state(bars, reward_risk_ratio=1.8)
+    state_custom = _compute_day_state(bars, reward_risk_ratio=3.0)
     assert state_custom.target_price > state_default.target_price
 
 
@@ -191,7 +191,7 @@ def test_short_side_stop_and_target():
         "16:15": {"open": 96.0, "high": 96.0, "low": 93.0, "close": 93.0},    # closes below breakout_low 94
     }
     bars = _make_day_bars(overrides)
-    state = _compute_day_state(bars, take_profit_r_multiple=1.8)
+    state = _compute_day_state(bars, reward_risk_ratio=1.8)
     assert state.breakout_direction == "short"
     assert state.entry_ts == pd.Timestamp(f"{DAY} 16:15", tz=RANGE_TZ)
     entry_price = 93.0

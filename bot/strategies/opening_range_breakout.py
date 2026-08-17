@@ -18,8 +18,7 @@ Rules (as specified):
      breakout bar's high (long) / below its low (short).
   6. Stop-loss: the opposite range boundary (long: range_low, short: range_high) -
      fixed, not ATR-based.
-  7. Take-profit: entry +/- `take_profit_r_multiple` x (entry - stop distance),
-     default 1.8.
+  7. Take-profit: entry +/- `reward_risk_ratio` x (entry - stop distance), default 1.8.
   8. At most one trade per day; any open position is force-closed at end of day.
   9. Optional trend filter (off by default - trend_filter_enabled=False preserves
      the exact behavior above): if enabled, at the moment an entry would otherwise
@@ -76,7 +75,7 @@ RANGE_WINDOW_END = "16:00"
 EOD_TZ = "America/New_York"
 EOD_CUTOFF_TIME = dt_time(15, 55)  # a few minutes ahead of the 16:00 ET close, as a safety margin
 
-DEFAULT_TAKE_PROFIT_R_MULTIPLE = 1.8
+DEFAULT_REWARD_RISK_RATIO = 1.8
 DEFAULT_TREND_FILTER_PERIOD = 120  # minutes == bars, since this strategy is 1-minute only
 DEFAULT_TREND_FILTER_MODE = "sma"
 VALID_TREND_FILTER_MODES = ("sma", "ema")
@@ -103,7 +102,7 @@ class _DayState:
     target_price: Optional[float] = None
 
 
-def _compute_day_state(today_bars: pd.DataFrame, take_profit_r_multiple: float) -> Optional[_DayState]:
+def _compute_day_state(today_bars: pd.DataFrame, reward_risk_ratio: float) -> Optional[_DayState]:
     """today_bars: bars already filtered to a single local trading day, tz-aware,
     sorted ascending. Returns None if the 15:29-16:00 range isn't established yet."""
     range_window = today_bars.between_time(RANGE_WINDOW_START, RANGE_WINDOW_END)
@@ -173,11 +172,11 @@ def _compute_day_state(today_bars: pd.DataFrame, take_profit_r_multiple: float) 
     if direction == "long":
         stop_price = range_low
         risk_amount = entry_price - stop_price
-        target_price = entry_price + take_profit_r_multiple * risk_amount
+        target_price = entry_price + reward_risk_ratio * risk_amount
     else:
         stop_price = range_high
         risk_amount = stop_price - entry_price
-        target_price = entry_price - take_profit_r_multiple * risk_amount
+        target_price = entry_price - reward_risk_ratio * risk_amount
 
     if risk_amount > 0:
         state.stop_price = stop_price
@@ -192,7 +191,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
     def __init__(
         self,
         symbol: str,
-        take_profit_r_multiple: float = DEFAULT_TAKE_PROFIT_R_MULTIPLE,
+        reward_risk_ratio: float = DEFAULT_REWARD_RISK_RATIO,
         trend_filter_enabled: bool = False,
         trend_filter_period: int = DEFAULT_TREND_FILTER_PERIOD,
         trend_filter_mode: str = DEFAULT_TREND_FILTER_MODE,
@@ -201,12 +200,12 @@ class OpeningRangeBreakoutStrategy(Strategy):
             raise ValueError(f"trend_filter_mode must be one of {VALID_TREND_FILTER_MODES}, got {trend_filter_mode!r}")
         super().__init__(
             symbol,
-            take_profit_r_multiple=take_profit_r_multiple,
+            reward_risk_ratio=reward_risk_ratio,
             trend_filter_enabled=trend_filter_enabled,
             trend_filter_period=trend_filter_period,
             trend_filter_mode=trend_filter_mode,
         )
-        self.take_profit_r_multiple = take_profit_r_multiple
+        self.reward_risk_ratio = reward_risk_ratio
         self.trend_filter_enabled = trend_filter_enabled
         self.trend_filter_period = trend_filter_period
         self.trend_filter_mode = trend_filter_mode
@@ -266,7 +265,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
         returned LONG/SHORT for them."""
         bars_local = self._to_local(bars)
         today_bars = self._today_bars(bars_local)
-        state = _compute_day_state(today_bars, self.take_profit_r_multiple)
+        state = _compute_day_state(today_bars, self.reward_risk_ratio)
         if state is None:
             return None
         return state.stop_price
@@ -277,7 +276,7 @@ class OpeningRangeBreakoutStrategy(Strategy):
 
         bars_local = self._to_local(bars)
         today_bars = self._today_bars(bars_local)
-        state = _compute_day_state(today_bars, self.take_profit_r_multiple)
+        state = _compute_day_state(today_bars, self.reward_risk_ratio)
         current_ts = today_bars.index[-1] if not today_bars.empty else None
         current_close = float(bars["close"].iloc[-1])
 
